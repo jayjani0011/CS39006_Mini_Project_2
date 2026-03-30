@@ -2,4 +2,4 @@
 Name : Jay Jani \
 Roll No. : 23CS10027
 
-This is my Networks Lab Mini Project 2 : SimpleMail – A Command-Line Mail System
+## SimpleMail – A Command-Line Mail System
