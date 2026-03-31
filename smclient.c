@@ -77,7 +77,7 @@ void smtp2(int sockfd) {
     Body (type '.' on a line by itself to finish):
     _
     */
-    char from[MAX_LINE], to[MAX_LINE], subject[MAX_LINE], body[MAX_LINE];
+    char from[MAX_LINE], to[MAX_LINE], subject[MAX_LINE];
     printf("From (your name): ");
     fgets(from, MAX_LINE, stdin);
     from[strcspn(from, "\n")] = 0;
@@ -135,7 +135,6 @@ void smtp2(int sockfd) {
     }
 
     printf("Body (type '.' on a line by itself to finish):\n");
-    char body_cmd[MAX_LINE];
     send_all(sockfd, "BODY\r\n");
     recv_line(sockfd, resp);
     if (strcmp(resp, "OK Send body, end with CRLF.CRLF") != 0) {
@@ -149,12 +148,26 @@ void smtp2(int sockfd) {
         line[strcspn(line, "\n")] = 0;
         char body_line[MAX_LINE];
         snprintf(body_line, MAX_LINE, "%s\r\n", line);
+        // printf("\t-> Sending: %s\n", line);
         send_all(sockfd, body_line);
-        if (strcmp(line, ".") == 0) {
+        if (strcmp(body_line, ".\r\n") == 0) {
             break;
         }
     }
+    printf("Sending mail...\n");
 
+    recv_line(sockfd, resp);
+    if (strncmp(resp, "OK Delivered to ", 16) != 0) {
+        printf("***Server error: %s\n", resp);
+        close(sockfd);
+        exit(1);
+    }
+
+    char* space = strchr(resp + 16, ' ');
+    if (space) {
+        space[0] = '\0';
+    }
+    to_count = atoi(resp + 16);
     printf("Mail delivered to %d recipient%s.\n", to_count, to_count > 1 ? "s" : "");
     // send QUIT command to server to end the session
     send_all(sockfd, "QUIT\r\n");
@@ -197,7 +210,7 @@ void handle_receiver(int sockfd, char* username) {
         while (getchar() != '\n'); // clear input buffer
 
         switch (choice) {
-            case 1:
+            case 1: {
                 send_all(sockfd, "LIST\r\n");
                 /* List like this here:
                     ID From Subject Date
@@ -228,8 +241,8 @@ void handle_receiver(int sockfd, char* username) {
                     printf("%s\n", token); // date
                 }
                 break;
-
-            case 2:
+            }
+            case 2: {
                 printf("Enter message ID: ");
                 int msg_id;
                 scanf("%d", &msg_id);
@@ -258,8 +271,8 @@ void handle_receiver(int sockfd, char* username) {
                     }
                 }
                 break;
-
-            case 3:
+            }
+            case 3: {
                 printf("Enter message ID: ");
                 int del_msg_id;
                 scanf("%d", &del_msg_id);
@@ -277,8 +290,8 @@ void handle_receiver(int sockfd, char* username) {
                     exit(1);
                 }
                 break;
-            
-            case 4:
+            }
+            case 4: {
                 send_all(sockfd, "QUIT\r\n");
                 recv_line(sockfd, resp);
                 if (strcmp(resp, "BYE") != 0) {
@@ -289,14 +302,14 @@ void handle_receiver(int sockfd, char* username) {
                 printf("Logged out.\n");
                 logged_in = false;
                 break;
-
+            }
             default:
                 printf("Invalid choice. Please try again.\n");
         }
     }
 }
 
-void mode_recv(int sockfd) {
+void smp(int sockfd) {
     // send MODE RECV command first
     send_all(sockfd, "MODE RECV\r\n");
     char recv_resp[MAX_LINE];
@@ -334,7 +347,7 @@ void mode_recv(int sockfd) {
     send_all(sockfd, auth_cmd);
     recv_line(sockfd, recv_resp);
     if (strncmp(recv_resp, "OK Welcome ", 11) == 0) {
-        printf("%s", recv_resp + 3); // print welcome message from server
+        printf("%s\n", recv_resp + 3); // print welcome message from server
     }
     else {
         printf("***Server error: %s\n", recv_resp);
@@ -366,6 +379,12 @@ int main(int argc, char* argv[]) {
         printf("***Usage : %s <server_ip> <PORT>\n", argv[0]);
         exit(1);
     }
+
+    #ifdef DEBUG
+    // clear debug file
+    FILE* fptr = fopen("debug.log", "w");
+    fclose(fptr);
+    #endif
 
     char* server_ip = strdup(argv[1]);
     int PORT = atoi(argv[2]);
@@ -411,21 +430,35 @@ int main(int argc, char* argv[]) {
         // use switch case for choice
 
         switch (choice) {
-            case 1:
+            case 1: {
                 smtp2(sockfd);
                 // reconnect to server for next operations, as server closes connection after QUIT
                 close(sockfd);
                 sockfd = connect_to_server(&servaddr);
+                char welcome_msg[MAX_LINE];
+                recv_line(sockfd, welcome_msg);
+                if (strcmp(welcome_msg, "WELCOME SimpleMail v1.0") != 0) {
+                    printf("***Server error: %s\n", welcome_msg);
+                    close(sockfd);
+                    exit(1);
+                }
                 break;
-            
-            case 2:
-                mode_recv(sockfd);
+            }
+            case 2: {
+                smp(sockfd);
                 // logged out from mailbox, so reconnect to server for next operations, as server closes connection after QUIT
                 close(sockfd);
                 sockfd = connect_to_server(&servaddr);
+                char welcome_msg[MAX_LINE];
+                recv_line(sockfd, welcome_msg);
+                if (strcmp(welcome_msg, "WELCOME SimpleMail v1.0") != 0) {
+                    printf("***Server error: %s\n", welcome_msg);
+                    close(sockfd);
+                    exit(1);
+                }
                 break;
-            
-            case 3:
+            }
+            case 3: {
                 send_all(sockfd, "QUIT\r\n");
                 char resp[MAX_LINE];
                 recv_line(sockfd, resp);
@@ -438,7 +471,7 @@ int main(int argc, char* argv[]) {
                 printf("Goodbye!\n");
                 exit(0);
                 break;
-
+    }
             default:
                 printf("Invalid choice. Please try again.\n");
         }

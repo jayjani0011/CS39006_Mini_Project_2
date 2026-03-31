@@ -28,14 +28,6 @@ enum state {
 };
 
 typedef struct {
-    char* username;
-    char* password;
-    int inboxCnt;
-    int unique_id;
-    messageinfo* inbox; // keep adding messages to this, when LIST command is received, just return the info in this array
-} usinfo;
-
-typedef struct {
     int id; // unique id for each message, can be generated using a global counter that increments with each new message
     char* from;
     char** to;
@@ -43,6 +35,15 @@ typedef struct {
     char** body;
     char* date;
 } messageinfo;
+
+typedef struct {
+    char* username;
+    char* password;
+    int inboxCnt;
+    int unique_id;
+    messageinfo* inbox; // keep adding messages to this, when LIST command is received, just return the info in this array
+} usinfo;
+
 
 typedef struct {
     int fd;
@@ -111,7 +112,7 @@ int recv_line(int fd, char* buf) {
     #ifdef DEBUG
     // print in some other file
     FILE* fptr = fopen("debug.log", "a");
-    fprintf(fptr, "S: %s\n", buf);
+    fprintf(fptr, "C: %s\n", buf);
     fclose(fptr);
     #endif
     return i + 1;
@@ -147,7 +148,7 @@ int directory_exists(const char* path) {
 
 void check_directory(char* name) {
     char path[MAX_LINE];
-    snprintf(path, MAX_LINE, "/mailboxes/%s", name);
+    snprintf(path, MAX_LINE, "./mailboxes/%s", name);
 
     struct stat info;
     if (stat(path, &info) != 0) {
@@ -184,7 +185,7 @@ void readfile(char* filename, usinfo users_info[]) {
         char* space = strchr(buffer, ' ');
         if (!space || bad || strlen(name) > 20) continue; // leave, this username is bad
         for (int i = 1; i < strlen(space); i++) {
-            if ((space[i] < 'a' || space[i] > 'z') && (space[i] < '0' || space[i] > '9')) bad = true;
+            if ((space[i] < 'a' || space[i] > 'z') && (space[i] < '0' || space[i] > '9') && (space[i] < 'A' || space[i] > 'Z')) bad = true;
         }
         if (bad) continue;
         check_directory(name);
@@ -199,7 +200,7 @@ void readfile(char* filename, usinfo users_info[]) {
     printf("[%s] Loaded %d users from %s\n", gettime(), nclients, filename);
 }
 
-int findindex(cliinfo users_info[], char* name) {
+int findindex(usinfo *users_info, char* name) {
     for (int i = 0; i < nclients; i++) {
         if (strcmp(users_info[i].username, name) == 0) return i;
     }
@@ -221,6 +222,12 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
+    #ifdef DEBUG
+    // clear debug file
+    FILE* fptr = fopen("debug.log", "w");
+    fclose(fptr);
+    #endif
+
     int PORT = atoi(argv[1]);
     char* users = strdup(argv[2]);
 
@@ -237,7 +244,7 @@ int main(int argc, char* argv[]) {
     servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
     servaddr.sin_port = htons(PORT);
     servaddr.sin_family = AF_INET;
-    if (bind(listen_fd, (struct sockaddr *)&servaddr, sizeof(servaddr) < 0)) {
+    if (bind(listen_fd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0) {
         perror("bind");
         exit(1);
     }
@@ -310,6 +317,14 @@ int main(int argc, char* argv[]) {
                 printf("[%s] Client %d disconnected abruptly.\n", gettime(), i);
                 close(clients[i].fd);
                 FD_CLR(clients[i].fd, &master_set);
+                clients[i].fd = -1;
+                clients[i].state = QUIT;
+                clients[i].msg.from = NULL;
+                clients[i].msg.to = NULL;
+                clients[i].msg.subject = NULL;
+                clients[i].msg.body = NULL;
+                clients[i].nonce = NULL;
+                clients[i].username = NULL;
                 continue;
             }
             // handle the client request here
@@ -369,6 +384,7 @@ int main(int argc, char* argv[]) {
                             // simple hash function: sum of ASCII values of combined mod 256, repeated 32 times in hex
                             if (strcmp(computed_hash, password_hash) == 0) {
                                 clients[i].state = AUTHENTICATED;
+                                clients[i].username = strdup(username);
                                 char welcome_msg[MAX_LINE];
                                 snprintf(welcome_msg, MAX_LINE, "OK Welcome %s\r\n", username);
                                 send_all(clients[i].fd, welcome_msg);
@@ -413,7 +429,7 @@ int main(int argc, char* argv[]) {
                     for (int j = 0; j < users_info[idx].inboxCnt; j++) {
                         char list_msg[MAX_LINE];
                         // assignment pdf has not used any delimiters, but since subject & from can have spaces, we need a delimiter to separate these fields, let's use ';'
-                        snprintf(list_msg, MAX_LINE, "%s;%s;%s;%s\r\n", users_info[idx].inbox[j].id, users_info[idx].inbox[j].from, users_info[idx].inbox[j].subject, users_info[idx].inbox[j].date);
+                        snprintf(list_msg, MAX_LINE, "%d;%s;%s;%s\r\n", users_info[idx].inbox[j].id, users_info[idx].inbox[j].from, users_info[idx].inbox[j].subject, users_info[idx].inbox[j].date);
                         send_all(clients[i].fd, list_msg);
                     }
                 }
@@ -425,14 +441,13 @@ int main(int argc, char* argv[]) {
                     close(clients[i].fd);
                     clients[i].fd = -1;
                 } else {
-                    int idx = findindex(users_info, clients[i].username);
                     int msg_id = atoi(req + 5);
                     // fetch the message from the path /mailboxes/<username>/<msg_id>.txt and just sent it as it is
                     // send each line of the body with \r\n and end with .\r\n
                     // need to use dot-stuffing if any line in the body starts with '.', we will prepend another '.' to it, and the client will remove it when receiving
 
                     char path[MAX_LINE];
-                    snprintf(path, MAX_LINE, "/mailboxes/%s/%d.txt", clients[i].username, msg_id);
+                    snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].username, msg_id);
                     FILE* fptr = fopen(path, "r");
 
                     if (fptr == NULL) {
@@ -465,7 +480,7 @@ int main(int argc, char* argv[]) {
                     int idx = findindex(users_info, clients[i].username);
                     int msg_id = atoi(req + 7);
                     char path[MAX_LINE];
-                    snprintf(path, MAX_LINE, "/mailboxes/%s/%d.txt", clients[i].username, msg_id);
+                    snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].username, msg_id);
                     if (remove(path) == 0) {
                         send_all(clients[i].fd, "OK Deleted\r\n");
                         // also remove this message from users_info[idx].inbox and decrease inboxCnt
@@ -576,7 +591,11 @@ int main(int argc, char* argv[]) {
                     clients[i].msg.to = NULL;
                 }
                 clients[i].msg.body = NULL;
+                clients[i].msg.date = NULL;
+                clients[i].msg.id = 0;
                 clients[i].state = QUIT;
+                clients[i].username = NULL;
+                clients[i].nonce = NULL;
                 printf("[%s] Client %d disconnected gracefully.\n", gettime(), i);
                 close(clients[i].fd);
                 FD_CLR(clients[i].fd, &master_set);
@@ -590,7 +609,7 @@ int main(int argc, char* argv[]) {
                     close(clients[i].fd);
                     clients[i].fd = -1;
                 } else {
-                    if (strcmp(req, ".\r\n") == 0) {
+                    if (strcmp(req, ".") == 0) {
                         // save the message to the mailboxes of all recipients
                         int recipient_count = 0;
                         for (int j = 0; clients[i].msg.to[j]; j++) {
@@ -598,7 +617,7 @@ int main(int argc, char* argv[]) {
                             int k = findindex(users_info, clients[i].msg.to[j]);
                             users_info[k].inboxCnt++; // this will decrease on deletion, but unique_id will always increase, so we can use unique_id to generate unique filenames for each message
                             users_info[k].unique_id++; // increment unique_id for each new message
-                            snprintf(path, MAX_LINE, "/mailboxes/%s/%d.txt", clients[i].msg.to[j], users_info[k].unique_id);
+                            snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].msg.to[j], users_info[k].unique_id);
                             FILE* fptr = fopen(path, "a");
                             if (fptr) {
                                 // use gettime to get the current time

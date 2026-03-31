@@ -1,0 +1,10 @@
+S: WELCOME SimpleMail v1.0
+C: MODE RECV
+S: OK
+S: AUTH REQUIRED 4yzlhec4
+C: AUTH bob 6828588264959452260
+S: OK Welcome bob
+C: COUNT
+S: OK 0
+C: LIST
+S: OK 0 messages
