@@ -12,7 +12,7 @@ const int MAX_CLIENTS = 10, MAX_LINE = 1024;
 
 // Helper functions - as TCP is a stream
 int send_all(int fd, char* msg) {
-    strcat(msg, "\n");
+    // assumes msg already has "\r\n" in it
     int len = strlen(msg), sent = 0;
     while (sent < len) {
         int n = send(fd, msg + sent, len - sent, 0);
@@ -22,7 +22,6 @@ int send_all(int fd, char* msg) {
         }
         sent += n;
     }
-    msg[len - 1] = '\0';
     return sent;
 }
 
@@ -32,12 +31,9 @@ int recv_line(int fd, char* buf) {
     while (1) {
         int n = recv(fd, &c, 1, 0);
         if (n == 0) return 0;
-        if (n < 0) {
-            printf("***Recv error\n");
-            exit(1);
-        }
-        if (c == '\n') break;
+        if (n < 0) return -1;
         buf[i++] = c;
+        if (c == '\n' && i >= 2 && buf[i - 2] == '\r') break; // got the terminator \r\n
     }
     buf[i] = '\0';
     return i + 1;

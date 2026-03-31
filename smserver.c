@@ -17,7 +17,8 @@ const int MAX_LINE = 512, MAX_CLIENTS = 100;
 int nclients = 0;
 
 enum state {
-    MODE,
+    MODE_SEND,
+    MODE_RECV,
     FROM,
     TO,
     SUB,
@@ -25,9 +26,22 @@ enum state {
     QUIT,
 };
 
+typedef struct {
+    char* username;
+    char* password;
+    int inboxCnt;
+} cliinfo;
+
+typedef struct {
+    char* from;
+    char** to;
+    char* subject;
+    char** body;
+} messageinfo;
+
 // Helper functions - as TCP is a stream
 int send_all(int fd, char* msg) {
-    // assumes msg already has '\n' in it
+    // assumes msg already has "\r\n" in it
     int len = strlen(msg), sent = 0;
     while (sent < len) {
         int n = send(fd, msg + sent, len - sent, 0);
@@ -47,22 +61,22 @@ int recv_line(int fd, char* buf) {
         int n = recv(fd, &c, 1, 0);
         if (n == 0) return 0;
         if (n < 0) return -1;
-        if (c == '\n') break;
         buf[i++] = c;
+        if (c == '\n' && i >= 2 && buf[i - 2] == '\r') break; // got the terminator \r\n
     }
     buf[i] = '\0';
     return i + 1;
 }
 
-void printtime() {
+char* gettime() {
     time_t rawtime;
     struct tm *timeinfo;
-    char buffer[80];
+    char* buffer = malloc(80);
 
     time(&rawtime);
     timeinfo = localtime(&rawtime);
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
-    printf("[%s] ", buffer);
+    strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", timeinfo);
+    return buffer;
 }
 
 int directory_exists(const char* path) {
@@ -98,7 +112,7 @@ void check_directory(char* name) {
     }
 }
 
-void readfile(char* filename, char* username[], char* password[]) {
+void readfile(char* filename, cliinfo users_info[]) {
     FILE* fptr = fopen(filename, "r");
     if (fptr == NULL) {
         printf("***File %s does not exist.\n", filename);
@@ -125,14 +139,21 @@ void readfile(char* filename, char* username[], char* password[]) {
         }
         if (bad) continue;
         check_directory(name);
-        username[nclients] = strdup(name);
-        password[nclients] = strdup(space + 1);
+        users_info[nclients].username = strdup(name);
+        users_info[nclients].password = strdup(space + 1);
+        users_info[nclients].inboxCnt = 0;
         nclients++;
     }
     fclose(fptr);
 
-    printtime();
-    printf("Loaded %d users from %s\n", nclients, filename);
+    printf("[%s] Loaded %d users from %s\n", gettime(), nclients, filename);
+}
+
+int findindex(cliinfo users_info[], char* name) {
+    for (int i = 0; i < nclients; i++) {
+        if (strcmp(users_info[i].username, name) == 0) return i;
+    }
+    return -1;
 }
 
 int main(int argc, char* argv[]) {
@@ -168,13 +189,11 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    printtime();
-    printf("Server started on port %d\n", PORT);
+    printf("[%s] Server started on port %d\n", gettime(), PORT);
 
     // read users.txt now
-    char* username[MAX_CLIENTS];
-    char* password[MAX_CLIENTS];
-    readfile(users, username, password);
+    cliinfo users_info[MAX_CLIENTS];
+    readfile(users, users_info);
 
     // start select() loop now
     fd_set master_set, read_set; // will be used in select()
@@ -182,10 +201,14 @@ int main(int argc, char* argv[]) {
     FD_SET(listen_fd, &master_set);
     int max_fd = listen_fd;
 
-    int client_fd[MAX_CLIENTS], sender_state[MAX_CLIENTS];
+    int client_fd[MAX_CLIENTS], state[MAX_CLIENTS];
+    messageinfo msg[MAX_CLIENTS];
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        sender_state[i] = -1;
+        state[i] = QUIT;
         client_fd[i] = -1;
+        msg[i].from = NULL;
+        msg[i].to = NULL;
+        msg[i].subject = NULL;
     }
 
     while (1) {
@@ -209,8 +232,7 @@ int main(int argc, char* argv[]) {
                         client_fd[i] = -1;
                         break;
                     }
-                    printtime();
-                    printf("New connection from %s : %d\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                    printf("[%s] New connection from %s : %d\n", gettime(), inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                     FD_SET(client_fd[i], &master_set);
                     if (client_fd[i] > max_fd) max_fd = client_fd[i];
                     send_all(client_fd[i], "WELCOME SimpleMail v1.0\r\n");
@@ -225,16 +247,189 @@ int main(int argc, char* argv[]) {
             char req[MAX_LINE];
             int n = recv_line(client_fd[i], req);
             if (n == 0) {
-                printtime();
-                printf("Client %d disconnected abruptly.\n");
+                printf("[%s] Client %d disconnected abruptly.\n", gettime(), i);
                 close(client_fd[i]);
                 FD_CLR(client_fd[i], &master_set);
                 continue;
             }
-
-            
+            // handle the client request here
+            if (strcmp(req, "MODE SEND") == 0) {
+                if (state[i] != QUIT) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    state[i] = MODE_SEND;
+                    send_all(client_fd[i], "OK\r\n");
+                    printf("[%s] Client %d selected MODE SEND\n", gettime(), i);
+                }
+            }
+            else if (strcmp(req, "MODE RECV") == 0) {
+                if (state[i] != QUIT) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    state[i] = MODE_RECV;
+                    send_all(client_fd[i], "OK\r\n");
+                    printf("[%s] Client %d selected MODE RECV\n", gettime(), i);
+                }
+            }
+            else if (strncmp(req, "FROM ", 5) == 0) {
+                if (state[i] != MODE_SEND) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    state[i] = FROM;
+                    msg[i].from = strdup(req + 5);
+                    send_all(client_fd[i], "OK Sender accepted\r\n");
+                }
+            }
+            else if (strncmp(req, "TO ", 3) == 0) {
+                if (state[i] != FROM && state[i] != TO) {
+                    // as multiple recipients are allowed
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    // change state only if this recipient is valid
+                    // OK Recipient accepted or ERR No such user
+                    char* recipient = strdup(req + 3);
+                    bool found = (findindex(users_info, recipient) != -1);
+                    if (!found) {
+                        send_all(client_fd[i], "ERR No such user\r\n");
+                    }
+                    else {
+                        state[i] = TO;
+                        // add recipient to msg[i].to
+                        int count = 0;
+                        if (msg[i].to) {
+                            while (msg[i].to[count]) count++;
+                        }
+                        msg[i].to = realloc(msg[i].to, sizeof(char*) * (count + 2));
+                        msg[i].to[count] = strdup(recipient);
+                        msg[i].to[count + 1] = NULL;
+                        send_all(client_fd[i], "OK Recipient accepted\r\n");
+                    }
+                }
+            }
+            else if (strncmp(req, "SUB ", 4) == 0) {
+                if (state[i] != TO) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    state[i] = SUB;
+                    msg[i].subject = strdup(req + 4);
+                    send_all(client_fd[i], "OK Subject accepted\r\n");
+                }
+            }
+            else if (strcmp(req, "BODY") == 0) {
+                // OK Send body, end with CRLF.CRLF
+                if (state[i] != SUB) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    state[i] = BODY;
+                    send_all(client_fd[i], "OK Send body, end with CRLF.CRLF\r\n");
+                }
+            }
+            else if (strcmp(req, "QUIT") == 0) {
+                // clear everything in msg[i] and set state to QUIT
+                send_all(client_fd[i], "BYE\r\n");
+                free(msg[i].from);
+                msg[i].from = NULL;
+                free(msg[i].subject);
+                msg[i].subject = NULL;
+                if (msg[i].to) {
+                    for (int j = 0; msg[i].to[j]; j++) {
+                        free(msg[i].to[j]);
+                    }
+                    free(msg[i].to);
+                    msg[i].to = NULL;
+                }
+                msg[i].body = NULL;
+                state[i] = QUIT;
+                printf("[%s] Client %d disconnected gracefully.\n", gettime(), i);
+                close(client_fd[i]);
+                FD_CLR(client_fd[i], &master_set);
+                client_fd[i] = -1;
+            }
+            else {
+                // keep appending to body until we get the terminator CRLF.CRLF
+                if (state[i] != BODY) {
+                    send_all(client_fd[i], "ERR Bad sequence\r\n");
+                    FD_CLR(client_fd[i], &master_set);
+                    close(client_fd[i]);
+                    client_fd[i] = -1;
+                } else {
+                    if (strcmp(req, ".\r\n") == 0) {
+                        // save the message to the mailboxes of all recipients
+                        int recipient_count = 0;
+                        for (int j = 0; msg[i].to[j]; j++) {
+                            char path[MAX_LINE];
+                            int k = findindex(users_info, msg[i].to[j]);
+                            users_info[k].inboxCnt++;
+                            snprintf(path, MAX_LINE, "/mailboxes/%s/%d.txt", msg[i].to[j], users_info[k].inboxCnt);
+                            FILE* fptr = fopen(path, "a");
+                            if (fptr) {
+                                // use gettime to get the current time
+                                char* ttime = gettime();
+                                // write MULTIPLE fprintf for better readability
+                                fprintf(fptr, "From: %s\n", msg[i].from);
+                                fprintf(fptr, "To: %s\n", msg[i].to[j]);
+                                fprintf(fptr, "Subject: %s\n", msg[i].subject);
+                                fprintf(fptr, "Date: %s\n", ttime);
+                                fprintf(fptr, "---\n");
+                                for (int j = 0; msg[i].body[j]; j++) {
+                                    fprintf(fptr, "%s", msg[i].body[j]); // ".\r\n" is not appended to body
+                                }
+                                free(ttime);
+                                fclose(fptr);
+                                recipient_count++;
+                            }
+                        }
+                        char res[MAX_LINE];
+                        snprintf(res, MAX_LINE, "OK Delivered to %d mailboxes\r\n", recipient_count);
+                        send_all(client_fd[i], res);
+                        printf("[%s] Mail delivered from \"%s\" to [", gettime(), msg[i].from);
+                        for (int j = 0; msg[i].to[j]; j++) {
+                            printf("%s", msg[i].to[j]);
+                            if (msg[i].to[j + 1]) printf(", ");
+                        }
+                        printf("] (%d recipient%s)\n", recipient_count, recipient_count > 1 ? "s" : "");
+                    }
+                    else {
+                        // append this line to body
+                        // body is multiple lines, char**
+                        char* line = req;
+                        if (line[0] == '.') line++; // if the line starts with '.', remove it (dot-stuffing)
+                        int len = strlen(req);
+                        int count = 0;
+                        if (msg[i].body) {
+                            while (msg[i].body[count]) count++;
+                            msg[i].body = realloc(msg[i].body, (count + 2) * sizeof(char*));
+                            msg[i].body[count] = malloc(len + 1);
+                            strcpy(msg[i].body[count], line);
+                            msg[i].body[count + 1] = NULL;
+                        } else {
+                            msg[i].body = malloc(2 * sizeof(char*));
+                            msg[i].body[0] = malloc(len + 1);
+                            strcpy(msg[i].body[0], line);
+                            msg[i].body[1] = NULL;
+                        }
+                    }
+                }
+            }
         }
     }
-
     exit(0);
 }
