@@ -31,8 +31,16 @@ int recv_line(int fd, char* buf) {
     char c;
     while (1) {
         int n = recv(fd, &c, 1, 0);
-        if (n == 0) return 0;
-        if (n < 0) return -1;
+        if (n == 0) {
+            printf("***Connection closed by Server abruptly\n");
+            close(fd);
+            exit(1);
+        }
+        if (n < 0) {
+            printf("***Recv error\n");
+            close(fd);
+            exit(1);
+        }
         if (c == '\n' && i >= 1 && buf[i - 1] == '\r') {
             i--;
             break; // got the terminator \r\n
@@ -199,7 +207,7 @@ void handle_receiver(int sockfd, char* username) {
         3. Delete a message
         4. Logout
         >*/
-        printf("1. List all messages\n");
+        printf("\n1. List all messages\n");
         printf("2. Read a message\n");
         printf("3. Delete a message\n");
         printf("4. Logout\n");
@@ -230,14 +238,14 @@ void handle_receiver(int sockfd, char* username) {
                 int listed_count = atoi(resp + 3);
                 for (int i = 0; i < listed_count; i++) {
                     recv_line(sockfd, resp);
-                    // parse the response using ';' as delimiter, as server sends in this format: <id>;<from>;<subject>;<date>
-                    char* token = strtok(resp, ";");
+                    // parse the response using '~' as delimiter, as server sends in this format: <id>~<from>~<subject>~<date>
+                    char* token = strtok(resp, "~");
                     printf("%-5s ", token); // id
-                    token = strtok(NULL, ";");
+                    token = strtok(NULL, "~");
                     printf("%-15s ", token); // from
-                    token = strtok(NULL, ";");
+                    token = strtok(NULL, "~");
                     printf("%-20s ", token); // subject
-                    token = strtok(NULL, ";");
+                    token = strtok(NULL, "~");
                     printf("%s\n", token); // date
                 }
                 break;
@@ -251,7 +259,7 @@ void handle_receiver(int sockfd, char* username) {
                 snprintf(read_cmd, MAX_LINE, "READ %d\r\n", msg_id);
                 send_all(sockfd, read_cmd);
                 recv_line(sockfd, resp);
-                if (strncmp(resp, "OK ", 3) != 0) {
+                if (strncmp(resp, "OK", 2) != 0) {
                     printf("***Server error: %s\n", resp);
                     close(sockfd);
                     exit(1);
@@ -330,30 +338,56 @@ void smp(int sockfd) {
     char nonce[9];
     strncpy(nonce, recv_resp + 14, 8);
     nonce[8] = '\0';
-    
     char username[21], password[31];
-    printf("Username: ");
-    fgets(username, 21, stdin);
-    username[strcspn(username, "\n")] = 0;
-    printf("Password: ");
-    fgets(password, 31, stdin);
-    password[strcspn(password, "\n")] = 0;
-    char combined[MAX_LINE];
-    snprintf(combined, MAX_LINE, "%s%s", password, nonce);
-    unsigned long hash = djb2(combined);
     
-    char auth_cmd[MAX_LINE]; // cannot pass password directly over the network, need to hash it first
-    snprintf(auth_cmd, MAX_LINE, "AUTH %s %lu\r\n", username, hash);
-    send_all(sockfd, auth_cmd);
-    recv_line(sockfd, recv_resp);
-    if (strncmp(recv_resp, "OK Welcome ", 11) == 0) {
-        printf("%s\n", recv_resp + 3); // print welcome message from server
-    }
-    else {
-        printf("***Server error: %s\n", recv_resp);
-        close(sockfd);
-        exit(1);
-    }
+    do {
+        printf("Username: ");
+        fgets(username, 21, stdin);
+        username[strcspn(username, "\n")] = 0;
+        printf("Password: ");
+        fgets(password, 31, stdin);
+        password[strcspn(password, "\n")] = 0;
+        char combined[MAX_LINE];
+        snprintf(combined, MAX_LINE, "%s%s", password, nonce);
+        unsigned long hash = djb2(combined);
+        
+        char auth_cmd[MAX_LINE]; // cannot pass password directly over the network, need to hash it first
+        snprintf(auth_cmd, MAX_LINE, "AUTH %s %lu\r\n", username, hash);
+        send_all(sockfd, auth_cmd);
+        recv_line(sockfd, recv_resp);
+        if (strncmp(recv_resp, "OK Welcome ", 11) == 0) {
+            printf("%s\n", recv_resp + 3); // print welcome message from server
+            break; // authenticated successfully
+        }
+        else if (strcmp(recv_resp, "ERR No such user") == 0) {
+            printf("***Error: No such user '%s'. Please try again.\n", username);
+            close(sockfd);
+            exit(1);
+        }
+        else if (strncmp(recv_resp, "ERR Authentication failed ", 26) == 0) {
+            int remaining_attempts = atoi(recv_resp + 26); // extract remaining attempts from the response
+            printf("***Error: Authentication failed for user '%s'. Attempts left : %d.\n", username, remaining_attempts);
+            if (remaining_attempts == 0) {
+                printf("***Authentication failed for user '%s', no remaining attempts. Closing connection.\n", username);
+                close(sockfd);
+                exit(1);
+            }
+            else {
+                // ask for username and password again, and resend the AUTH command with the same nonce
+                printf("Please try again.\n");
+            }
+        }
+        else {
+            printf("***Server error: %s\n", recv_resp);
+            send_all(sockfd, "QUIT\r\n");
+            recv_line(sockfd, recv_resp);
+            if (strcmp(recv_resp, "BYE") != 0) {
+                printf("***Server error: %s\n", recv_resp);
+            }
+            close(sockfd);
+            exit(1);
+        }
+    } while (1);
 
     handle_receiver(sockfd, username);
 }
@@ -379,12 +413,6 @@ int main(int argc, char* argv[]) {
         printf("***Usage : %s <server_ip> <PORT>\n", argv[0]);
         exit(1);
     }
-
-    #ifdef DEBUG
-    // clear debug file
-    FILE* fptr = fopen("debug.log", "w");
-    fclose(fptr);
-    #endif
 
     char* server_ip = strdup(argv[1]);
     int PORT = atoi(argv[2]);

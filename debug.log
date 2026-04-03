@@ -1,10 +1,31 @@
 S: WELCOME SimpleMail v1.0
+C: MODE SEND
+S: OK
+C: FROM Jay Jani
+S: OK Sender accepted
+C: TO bob
+S: OK Recipient accepted
+C: TO dofvl;db
+S: ERR No such user
+C: SUB dihvbdb
+S: OK Subject accepted
+C: BODY
+S: OK Send body, end with CRLF.CRLF
+C: dlhbdb
+C: .
+S: OK Delivered to 1 mailboxes
+C: QUIT
+S: BYE
+S: WELCOME SimpleMail v1.0
 C: MODE RECV
 S: OK
-S: AUTH REQUIRED 4yzlhec4
-C: AUTH bob 6828588264959452260
+S: AUTH REQUIRED ikb9jnj7
+C: AUTH bob 6828590504656728981
 S: OK Welcome bob
 C: COUNT
-S: OK 0
+S: OK 3
 C: LIST
-S: OK 0 messages
+S: OK 3 messages
+S: 5;Jay Jani;ibdb;2026-04-03 13:42:52
+S: 3;bob the builder;Hii;2026-04-03 12:59:45
+S: 0;Jay Jani;dihvbdb;

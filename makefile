@@ -13,6 +13,12 @@ dserver: smserver.c
 dclient: smclient.c
 	$(CC) $(CFLAGS) -DDEBUG -o dclient smclient.c
 
+init: init.c
+	$(CC) $(CFLAGS) -o init init.c
+
+runinit: init
+	./init users.txt
+
 runserver: smserver
 	./smserver 8080 users.txt
 
@@ -26,4 +32,7 @@ drunclient: dclient
 	./dclient 127.0.0.1 8080
 
 clean:
-	rm -f smserver smclient
+	rm -f smserver smclient dserver dclient init
+
+deepclean: clean
+	rm -rf mailboxes

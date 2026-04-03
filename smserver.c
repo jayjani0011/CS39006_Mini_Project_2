@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -12,9 +13,15 @@
 
 #include <sys/stat.h>
 #include <sys/select.h>
+#include <dirent.h>
 
-const int MAX_LINE = 512, MAX_CLIENTS = 100;
-int nclients = 0;
+// not using const int here, because we need compile-time constraints for array sizes
+#define MAX_CLIENTS 10
+#define MAX_LINE 509 // as a dot-stuffed line will be .<line>\r\n
+#define MAX_LINE_SNPRINTF 800 // to leave space for \r\n and \0
+#define MAX_ATTEMPTS 3
+
+int nusers = 0;
 
 enum state {
     MODE_RECV,
@@ -29,54 +36,47 @@ enum state {
 
 typedef struct {
     int id; // unique id for each message, can be generated using a global counter that increments with each new message
-    char* from;
-    char** to;
-    char* subject;
-    char** body;
-    char* date;
+    char from[40];
+    char to[2 * MAX_CLIENTS][21]; // array of recipient usernames, max MAX_CLIENTS recipients
+    char subject[100];
+    char body[50][100]; // assuming max 10 lines of body, each up to 100 characters
+    char date[20];
 } messageinfo;
 
 typedef struct {
-    char* username;
-    char* password;
+    char username[21];
+    char password[31];
     int inboxCnt;
     int unique_id;
-    messageinfo* inbox; // keep adding messages to this, when LIST command is received, just return the info in this array
+    messageinfo inbox[100]; // keep adding messages to this, when LIST command is received, just return the info in this array
 } usinfo;
 
 
 typedef struct {
     int fd;
-    char* username;
-    char* nonce;
+    char username[50];
+    char nonce[9];
     enum state state;
     messageinfo msg;
+    int auth_chances; // to limit the number of authentication attempts
 } cliinfo;
 
 void copymsg(messageinfo* dest, messageinfo* src) {
     dest->id = src->id;
-    dest->from = strdup(src->from);
+    strcpy(dest->from, src->from);
     int to_count = 0;
-    if (src->to) {
-        while (src->to[to_count]) to_count++;
+    for (int i = 0; i < MAX_CLIENTS && src->to[i][0] != '\0'; i++) {
+        strcpy(dest->to[i], src->to[i]);
+        to_count++;
     }
-    dest->to = malloc(sizeof(char*) * (to_count + 1));
-    for (int i = 0; i < to_count; i++) {
-        dest->to[i] = strdup(src->to[i]);
-    }
-    dest->to[to_count] = NULL;
-    dest->subject = strdup(src->subject);
+    dest->to[to_count][0] = '\0';
+    strcpy(dest->subject, src->subject);
     // no need to copy body, we will read it from the file when the client sends the READ command, to save memory
 }
 
-void add_message_to_inbox(messageinfo* msgs, messageinfo newmsg) {
-    int count = 0;
-    if (msgs) {
-        while (msgs[count].from) count++;
-    }
-    msgs = realloc(msgs, sizeof(messageinfo) * (count + 2));
-    copymsg(&msgs[count], &newmsg);
-    msgs[count + 1].from = NULL; // mark the end of the array
+void add_message_to_inbox(messageinfo* msgs, messageinfo newmsg, int count) {
+    copymsg(&msgs[count - 1], &newmsg);
+    msgs[count].from[0] = '\0'; // mark the end of the array
 }
 
 
@@ -189,22 +189,105 @@ void readfile(char* filename, usinfo users_info[]) {
         }
         if (bad) continue;
         check_directory(name);
-        users_info[nclients].username = strdup(name);
-        users_info[nclients].password = strdup(space + 1);
-        users_info[nclients].inboxCnt = 0;
-        users_info[nclients].inbox = NULL;
-        nclients++;
+        strcpy(users_info[nusers].username, name);
+        strcpy(users_info[nusers].password, space + 1);
+        // update users_info[nusers].inboxCnt by counting the number of files in the directory ./mailboxes/<username>/
+        char path[MAX_LINE];
+        snprintf(path, MAX_LINE, "./mailboxes/%s", name);
+        int count = 0;
+        struct stat st = {0};
+        if (stat(path, &st) == -1) {
+            perror("stat error");
+            exit(1);
+        }
+        if (S_ISDIR(st.st_mode)) {
+            // It's a directory, count the number of files in it
+            DIR* dir = opendir(path);
+            if (dir == NULL) {
+                perror("opendir error");
+                exit(1);
+            }
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) { // Only count regular files
+                    count++;
+                }
+            }
+            closedir(dir);
+        }
+        // and users_info[nusers].inbox by reading the info of each message from these files
+        count--; // as 0.txt is not to be counted
+        users_info[nusers].inboxCnt = count;
+        int idx = 0;
+        DIR* dir = opendir(path);
+        if (dir == NULL) {
+            perror("opendir error");
+            exit(1);
+        }
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) { // Only count regular files
+                char msg_path[MAX_LINE_SNPRINTF];
+                snprintf(msg_path, MAX_LINE_SNPRINTF, "%s/%s", path, entry->d_name);
+                FILE* msg_file = fopen(msg_path, "r");
+                if (msg_file == NULL) {
+                    perror("fopen error");
+                    exit(1);
+                }
+                // if d->name is 0.txt, initialize unique_id to the number written in it
+                if (strcmp(entry->d_name, "0.txt") == 0) {
+                    char id_str[10];
+                    fgets(id_str, 10, msg_file);
+                    id_str[strcspn(id_str, "\n")] = '\0';
+                    users_info[nusers].unique_id = atoi(id_str);
+                    fclose(msg_file);
+                    continue;
+                }
+                char line[MAX_LINE];
+                messageinfo *msg = &users_info[nusers].inbox[idx++];
+                msg->id = atoi(entry->d_name); // filename is the id of the message
+                fgets(line, MAX_LINE, msg_file);
+                line[strcspn(line, "\n")] = '\0';
+                strcpy(msg->from, line + 6); // first line is From: <name>
+                fgets(line, MAX_LINE, msg_file);
+                line[strcspn(line, "\n")] = '\0';
+                strcpy(msg->to[0], line + 4); // second line is To: <name>
+                fgets(line, MAX_LINE, msg_file);
+                line[strcspn(line, "\n")] = '\0';
+                strcpy(msg->subject, line + 9); // third line is Subject: <subject>
+                fgets(line, MAX_LINE, msg_file);
+                line[strcspn(line, "\n")] = '\0';
+                strcpy(msg->date, line + 6); // fourth line is Date: <date>
+                fclose(msg_file);
+            }
+        }
+        closedir(dir);
+        nusers++;
     }
     fclose(fptr);
 
-    printf("[%s] Loaded %d users from %s\n", gettime(), nclients, filename);
+    printf("[%s] Loaded %d users from %s\n", gettime(), nusers, filename);
 }
 
 int findindex(usinfo *users_info, char* name) {
-    for (int i = 0; i < nclients; i++) {
+    for (int i = 0; i < nusers; i++) {
         if (strcmp(users_info[i].username, name) == 0) return i;
     }
     return -1;
+}
+
+void reset_client(cliinfo* client) {
+    client->msg.from[0] = '\0';
+    client->msg.subject[0] = '\0';
+    client->msg.to[0][0] = '\0';
+    client->msg.body[0][0] = '\0';
+    client->msg.date[0] = '\0';
+    client->msg.id = 0;
+    client->state = QUIT;
+    client->fd = -1;
+    client->auth_chances = MAX_ATTEMPTS;
+    client->username[0] = '\0';
+    client->nonce[0] = '\0';
 }
 
 unsigned long djb2(const char *str) {
@@ -269,14 +352,10 @@ int main(int argc, char* argv[]) {
 
     cliinfo clients[MAX_CLIENTS];
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        clients[i].state = QUIT;
-        clients[i].fd = -1;
-        clients[i].msg.from = NULL;
-        clients[i].msg.to = NULL;
-        clients[i].msg.subject = NULL;
-        clients[i].msg.body = NULL;
-        clients[i].nonce = NULL;
+        reset_client(clients + i);
     }
+    
+    printf("[%s] Waiting for clients to connect...\n", gettime());
 
     while (1) {
         read_set = master_set;
@@ -296,7 +375,7 @@ int main(int argc, char* argv[]) {
                     clients[i].fd = accept(listen_fd, (struct sockaddr *)&client_addr, &len);
                     if (clients[i].fd < 0) {
                         perror("accept");
-                        clients[i].fd = -1;
+                        reset_client(&clients[i]);
                         break;
                     }
                     printf("[%s] New connection from %s : %d\n", gettime(), inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
@@ -317,14 +396,7 @@ int main(int argc, char* argv[]) {
                 printf("[%s] Client %d disconnected abruptly.\n", gettime(), i);
                 close(clients[i].fd);
                 FD_CLR(clients[i].fd, &master_set);
-                clients[i].fd = -1;
-                clients[i].state = QUIT;
-                clients[i].msg.from = NULL;
-                clients[i].msg.to = NULL;
-                clients[i].msg.subject = NULL;
-                clients[i].msg.body = NULL;
-                clients[i].nonce = NULL;
-                clients[i].username = NULL;
+                reset_client(&clients[i]);
                 continue;
             }
             // handle the client request here
@@ -333,7 +405,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     clients[i].state = MODE_RECV;
                     send_all(clients[i].fd, "OK\r\n");
@@ -343,7 +415,7 @@ int main(int argc, char* argv[]) {
                         nonce[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[rand() % 36];
                     }
                     nonce[8] = '\0';
-                    clients[i].nonce = strdup(nonce);
+                    strcpy(clients[i].nonce, nonce);
                     char auth_msg[MAX_LINE];
                     snprintf(auth_msg, MAX_LINE, "AUTH REQUIRED %s\r\n", nonce);
                     send_all(clients[i].fd, auth_msg);
@@ -356,14 +428,14 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     char* space1 = strchr(req + 5, ' ');
                     if (!space1) {
                         send_all(clients[i].fd, "ERR Bad sequence\r\n");
                         FD_CLR(clients[i].fd, &master_set);
                         close(clients[i].fd);
-                        clients[i].fd = -1;
+                        reset_client(&clients[i]);
                     } else {
                         *space1 = '\0';
                         char* username = req + 5;
@@ -373,7 +445,7 @@ int main(int argc, char* argv[]) {
                             send_all(clients[i].fd, "ERR No such user\r\n");
                             FD_CLR(clients[i].fd, &master_set);
                             close(clients[i].fd);
-                            clients[i].fd = -1;
+                            reset_client(&clients[i]);
                         } else {
                             // compute the hash of the password in users_info[idx].password with the nonce and compare with password_hash
                             char combined[80];
@@ -384,16 +456,25 @@ int main(int argc, char* argv[]) {
                             // simple hash function: sum of ASCII values of combined mod 256, repeated 32 times in hex
                             if (strcmp(computed_hash, password_hash) == 0) {
                                 clients[i].state = AUTHENTICATED;
-                                clients[i].username = strdup(username);
+                                strcpy(clients[i].username, username);
                                 char welcome_msg[MAX_LINE];
                                 snprintf(welcome_msg, MAX_LINE, "OK Welcome %s\r\n", username);
                                 send_all(clients[i].fd, welcome_msg);
                                 printf("[%s] Authentication successful for user %s\n", gettime(), username);
                             } else {
-                                send_all(clients[i].fd, "ERR Authentication failed\r\n");
-                                FD_CLR(clients[i].fd, &master_set);
-                                close(clients[i].fd);
-                                clients[i].fd = -1;
+                                clients[i].auth_chances--;
+                                char auth_fail_msg[MAX_LINE];
+                                snprintf(auth_fail_msg, MAX_LINE, "ERR Authentication failed %d\r\n", clients[i].auth_chances);
+                                send_all(clients[i].fd, auth_fail_msg);
+                                if (clients[i].auth_chances == 0) {
+                                    FD_CLR(clients[i].fd, &master_set);
+                                    close(clients[i].fd);
+                                    reset_client(&clients[i]);
+                                    printf("[%s] Authentication failed for user %s, remaining attempts: %d, close connection\n", gettime(), username, clients[i].auth_chances);
+                                }
+                                else {
+                                    printf("[%s] Authentication failed for user %s, remaining attempts: %d\n", gettime(), username, clients[i].auth_chances);
+                                }
                             }
                         }
                     }
@@ -404,7 +485,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     int idx = findindex(users_info, clients[i].username);
                     char list_msg[MAX_LINE];
@@ -417,7 +498,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     // send in this format
                     // OK <count> messages
@@ -428,8 +509,8 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, msg);
                     for (int j = 0; j < users_info[idx].inboxCnt; j++) {
                         char list_msg[MAX_LINE];
-                        // assignment pdf has not used any delimiters, but since subject & from can have spaces, we need a delimiter to separate these fields, let's use ';'
-                        snprintf(list_msg, MAX_LINE, "%d;%s;%s;%s\r\n", users_info[idx].inbox[j].id, users_info[idx].inbox[j].from, users_info[idx].inbox[j].subject, users_info[idx].inbox[j].date);
+                        // assignment pdf has not used any delimiters, but since subject & from can have spaces, we need a delimiter to separate these fields, let's use '~'
+                        snprintf(list_msg, MAX_LINE, "%d~%s~%s~%s\r\n", users_info[idx].inbox[j].id, users_info[idx].inbox[j].from, users_info[idx].inbox[j].subject, users_info[idx].inbox[j].date);
                         send_all(clients[i].fd, list_msg);
                     }
                 }
@@ -439,7 +520,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     int msg_id = atoi(req + 5);
                     // fetch the message from the path /mailboxes/<username>/<msg_id>.txt and just sent it as it is
@@ -457,43 +538,57 @@ int main(int argc, char* argv[]) {
                         char line[MAX_LINE];
                         while (fgets(line, MAX_LINE, fptr) != NULL) {
                             // apply dot-stuffing
+                            line[strcspn(line, "\n")] = '\0';
+                            char stuffed_line[MAX_LINE + 3];
                             if (line[0] == '.') {
-                                char stuffed_line[MAX_LINE];
-                                snprintf(stuffed_line, MAX_LINE, ".%s", line);
-                                send_all(clients[i].fd, stuffed_line);
+                                snprintf(stuffed_line, MAX_LINE + 3, ".%s\r\n", line);
                             } else {
-                                send_all(clients[i].fd, line);
+                                snprintf(stuffed_line, MAX_LINE + 3, "%s\r\n", line);
                             }
+                            send_all(clients[i].fd, stuffed_line);
                         }
                         send_all(clients[i].fd, ".\r\n");
                         fclose(fptr);
+                        printf("[%s] User %s READ message %d\n", gettime(), clients[i].username, msg_id);
                     }
                 }
             }
-            else if (strncmp(req, "DELETE, ", 7) == 0) {
+            else if (strncmp(req, "DELETE ", 7) == 0) {
                 if (clients[i].state != AUTHENTICATED) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     int idx = findindex(users_info, clients[i].username);
                     int msg_id = atoi(req + 7);
                     char path[MAX_LINE];
                     snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].username, msg_id);
                     if (remove(path) == 0) {
-                        send_all(clients[i].fd, "OK Deleted\r\n");
                         // also remove this message from users_info[idx].inbox and decrease inboxCnt
                         for (int j = 0; j < users_info[idx].inboxCnt; j++) {
                             if (users_info[idx].inbox[j].id == msg_id) {
                                 // shift all messages after this to the left by one
                                 for (int k = j; k < users_info[idx].inboxCnt - 1; k++) {
-                                    users_info[idx].inbox[k] = users_info[idx].inbox[k + 1];
+                                    // users_info[idx].inbox[k] = users_info[idx].inbox[k + 1]; can't do this directly noob!
+                                    users_info[idx].inbox[k].id = users_info[idx].inbox[k + 1].id;
+                                    strcpy(users_info[idx].inbox[k].from, users_info[idx].inbox[k + 1].from);
+                                    int to_count = 0;
+                                    while (users_info[idx].inbox[k + 1].to[to_count][0] != '\0') to_count++;
+                                    for (int t = 0; t < to_count; t++) {
+                                        strcpy(users_info[idx].inbox[k].to[t], users_info[idx].inbox[k + 1].to[t]);
+                                    }
+                                    users_info[idx].inbox[k].to[to_count][0] = '\0';
+                                    strcpy(users_info[idx].inbox[k].subject, users_info[idx].inbox[k + 1].subject);
+                                    strcpy(users_info[idx].inbox[k].date, users_info[idx].inbox[k + 1].date);
                                 }
                                 users_info[idx].inboxCnt--;
+                                users_info[idx].inbox[users_info[idx].inboxCnt].from[0] = '\0'; // mark the end of the array
                                 break;
                             }
                         }
+                        send_all(clients[i].fd, "OK Deleted\r\n");
+                        printf("[%s] User %s DELETE message %d\n", gettime(), clients[i].username, msg_id);
                     } else {
                         send_all(clients[i].fd, "ERR No such message\r\n");
                     }
@@ -504,7 +599,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     clients[i].state = MODE_SEND;
                     send_all(clients[i].fd, "OK\r\n");
@@ -516,10 +611,10 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     clients[i].state = FROM;
-                    clients[i].msg.from = strdup(req + 5);
+                    strcpy(clients[i].msg.from, req + 5);
                     send_all(clients[i].fd, "OK Sender accepted\r\n");
                 }
             }
@@ -529,7 +624,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     // change state only if this recipient is valid
                     // OK Recipient accepted or ERR No such user
@@ -543,11 +638,10 @@ int main(int argc, char* argv[]) {
                         // add recipient to msg[i].to
                         int count = 0;
                         if (clients[i].msg.to) {
-                            while (clients[i].msg.to[count]) count++;
+                            while (clients[i].msg.to[count][0] != '\0') count++;
                         }
-                        clients[i].msg.to = realloc(clients[i].msg.to, sizeof(char*) * (count + 2));
-                        clients[i].msg.to[count] = strdup(recipient);
-                        clients[i].msg.to[count + 1] = NULL;
+                        strcpy(clients[i].msg.to[count], recipient);
+                        clients[i].msg.to[count + 1][0] = '\0';
                         send_all(clients[i].fd, "OK Recipient accepted\r\n");
                     }
                 }
@@ -557,10 +651,10 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     clients[i].state = SUB;
-                    clients[i].msg.subject = strdup(req + 4);
+                    strcpy(clients[i].msg.subject, req + 4);
                     send_all(clients[i].fd, "OK Subject accepted\r\n");
                 }
             }
@@ -570,7 +664,7 @@ int main(int argc, char* argv[]) {
                     send_all(clients[i].fd, "ERR Bad sequence\r\n");
                     FD_CLR(clients[i].fd, &master_set);
                     close(clients[i].fd);
-                    clients[i].fd = -1;
+                    reset_client(&clients[i]);
                 } else {
                     clients[i].state = BODY;
                     send_all(clients[i].fd, "OK Send body, end with CRLF.CRLF\r\n");
@@ -579,27 +673,10 @@ int main(int argc, char* argv[]) {
             else if (strcmp(req, "QUIT") == 0) {
                 // clear everything in msg[i] and set state to QUIT
                 send_all(clients[i].fd, "BYE\r\n");
-                free(clients[i].msg.from);
-                clients[i].msg.from = NULL;
-                free(clients[i].msg.subject);
-                clients[i].msg.subject = NULL;
-                if (clients[i].msg.to) {
-                    for (int j = 0; clients[i].msg.to[j]; j++) {
-                        free(clients[i].msg.to[j]);
-                    }
-                    free(clients[i].msg.to);
-                    clients[i].msg.to = NULL;
-                }
-                clients[i].msg.body = NULL;
-                clients[i].msg.date = NULL;
-                clients[i].msg.id = 0;
-                clients[i].state = QUIT;
-                clients[i].username = NULL;
-                clients[i].nonce = NULL;
-                printf("[%s] Client %d disconnected gracefully.\n", gettime(), i);
                 close(clients[i].fd);
                 FD_CLR(clients[i].fd, &master_set);
-                clients[i].fd = -1;
+                reset_client(&clients[i]);
+                printf("[%s] Client %d disconnected gracefully.\n", gettime(), i);
             }
             else {
                 // keep appending to body until we get the terminator CRLF.CRLF
@@ -612,36 +689,50 @@ int main(int argc, char* argv[]) {
                     if (strcmp(req, ".") == 0) {
                         // save the message to the mailboxes of all recipients
                         int recipient_count = 0;
-                        for (int j = 0; clients[i].msg.to[j]; j++) {
+                        for (int j = 0; clients[i].msg.to[j][0] != '\0'; j++) {
                             char path[MAX_LINE];
                             int k = findindex(users_info, clients[i].msg.to[j]);
                             users_info[k].inboxCnt++; // this will decrease on deletion, but unique_id will always increase, so we can use unique_id to generate unique filenames for each message
                             users_info[k].unique_id++; // increment unique_id for each new message
                             snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].msg.to[j], users_info[k].unique_id);
-                            FILE* fptr = fopen(path, "a");
+                            FILE* fptr = fopen(path, "w");
+                            printf("[%s] Delivering mail to %s's mailbox with id %d\n", gettime(), clients[i].msg.to[j], users_info[k].unique_id);
                             if (fptr) {
                                 // use gettime to get the current time
-                                clients[i].msg.date = strdup(gettime());
-                                add_message_to_inbox(users_info[k].inbox, clients[i].msg);
+                                strcpy(clients[i].msg.date, gettime());
                                 fprintf(fptr, "From: %s\n", clients[i].msg.from);
                                 fprintf(fptr, "To: %s\n", clients[i].msg.to[j]);
                                 fprintf(fptr, "Subject: %s\n", clients[i].msg.subject);
                                 fprintf(fptr, "Date: %s\n", clients[i].msg.date);
                                 fprintf(fptr, "---\n");
-                                for (int j = 0; clients[i].msg.body[j]; j++) {
+                                for (int j = 0; clients[i].msg.body[j][0] != '\0'; j++) {
                                     fprintf(fptr, "%s\n", clients[i].msg.body[j]); // ".\r\n" is not appended to body
                                 }
                                 fclose(fptr);
                                 recipient_count++;
+                                add_message_to_inbox(users_info[k].inbox, clients[i].msg, users_info[k].inboxCnt);
+                                printf("[%s] Mail added to %s's inbox in memory\n", gettime(), clients[i].msg.to[j]);
+                            }
+                            // change the unique_id in 0.txt to the new unique_id
+                            char id_path[MAX_LINE];
+                            snprintf(id_path, MAX_LINE, "./mailboxes/%s/0.txt", clients[i].msg.to[j]);
+                            FILE* id_fptr = fopen(id_path, "w");
+                            if (id_fptr) {
+                                fprintf(id_fptr, "%d", users_info[k].unique_id);
+                                fclose(id_fptr);
+                            }
+                            else {
+                                perror("fopen error");
+                                continue;
                             }
                         }
                         char res[MAX_LINE];
                         snprintf(res, MAX_LINE, "OK Delivered to %d mailboxes\r\n", recipient_count);
                         send_all(clients[i].fd, res);
                         printf("[%s] Mail delivered from \"%s\" to [", gettime(), clients[i].msg.from);
-                        for (int j = 0; clients[i].msg.to[j]; j++) {
+                        for (int j = 0; clients[i].msg.to[j][0] != '\0'; j++) {
                             printf("%s", clients[i].msg.to[j]);
-                            if (clients[i].msg.to[j + 1]) printf(", ");
+                            if (clients[i].msg.to[j + 1][0] != '\0') printf(", ");
                         }
                         printf("] (%d recipient%s)\n", recipient_count, recipient_count > 1 ? "s" : "");
                         clients[i].state = QUIT; // clearing will be done when QUIT command is received, but we can set state to QUIT here to avoid accepting more lines for this message
@@ -651,20 +742,10 @@ int main(int argc, char* argv[]) {
                         // body is multiple lines, char**
                         char* line = req;
                         if (line[0] == '.') line++; // if the line starts with '.', remove it (dot-stuffing)
-                        int len = strlen(req);
                         int count = 0;
-                        if (clients[i].msg.body) {
-                            while (clients[i].msg.body[count]) count++;
-                            clients[i].msg.body = realloc(clients[i].msg.body, (count + 2) * sizeof(char*));
-                            clients[i].msg.body[count] = malloc(len + 1);
-                            strcpy(clients[i].msg.body[count], line);
-                            clients[i].msg.body[count + 1] = NULL;
-                        } else {
-                            clients[i].msg.body = malloc(2 * sizeof(char*));
-                            clients[i].msg.body[0] = malloc(len + 1);
-                            strcpy(clients[i].msg.body[0], line);
-                            clients[i].msg.body[1] = NULL;
-                        }
+                        while (clients[i].msg.body[count][0] != '\0') count++;
+                        strcpy(clients[i].msg.body[count], line);
+                        clients[i].msg.body[count + 1][0] = '\0'; // mark the end of the array
                     }
                 }
             }

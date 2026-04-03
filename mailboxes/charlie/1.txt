@@ -1,0 +1,9 @@
+From: bob the builder
+To: charlie
+Subject: Hello
+Date: 2026-04-03 13:02:20
+---
+Hii everyone
+how are you all?
+Bye/
+.
