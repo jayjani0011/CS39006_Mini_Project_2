@@ -81,10 +81,8 @@ Each user's `mailboxes/<username>/0.txt` stores the last-used integer ID. On eve
 
 5. **`ERR Authentication failed` includes remaining attempts.** The server appends the remaining attempt count to the authentication failure response (e.g., `ERR Authentication failed 2`) so the client can display it to the user. This is an extension of the base spec response.
 
-6. **Empty subject handling.** If the client sends `SUB ` with nothing after the space, the subject is stored as an empty string, not `(no subject)`. This is a minor deviation from the spec.
+6. **Nonce generation.** The nonce is generated using `rand()` seeded with `time(NULL) + i` (where `i` is the character index). This is not cryptographically secure but is sufficient for this project.
 
-7. **Nonce generation.** The nonce is generated using `rand()` seeded with `time(NULL) + i` (where `i` is the character index). This is not cryptographically secure but is sufficient for this project.
+7. **`users.txt` requires at least one valid user.** Malformed lines are skipped silently, but if the file is entirely invalid or missing, the server exits.
 
-8. **`users.txt` requires at least one valid user.** Malformed lines are skipped silently, but if the file is entirely invalid or missing, the server exits.
-
-9. **Debug mode.** Compiling with `-DDEBUG` (targets `dserver` / `dclient`) logs all raw protocol lines to `debug.log` for inspection.
+8. **Debug mode.** Compiling with `-DDEBUG` (targets `dserver` / `dclient`) logs all raw protocol lines to `debug.log` for inspection.
