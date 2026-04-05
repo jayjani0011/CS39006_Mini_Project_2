@@ -2,6 +2,7 @@
 
 **Name:** Jay Jani  
 **Roll No.:** 23CS10027
+**Github Repo. Link:** https://github.com/jayjani0011/CS39006_Mini_Project_2
 
 ---
 
