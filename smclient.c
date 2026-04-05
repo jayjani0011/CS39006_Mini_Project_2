@@ -344,9 +344,14 @@ void smp(int sockfd) {
         printf("Username: ");
         fgets(username, 21, stdin);
         username[strcspn(username, "\n")] = 0;
+        for (int i = 0; i < strlen(username); i++) {
+            if (username[i] >= 'A' && username[i] <= 'Z') {
+                username[i] = tolower(username[i]); // username is case-insensitive, convert to lowercase
+            }
+        }
         printf("Password: ");
         fgets(password, 31, stdin);
-        password[strcspn(password, "\n")] = 0;
+        password[strcspn(password, "\n")] = 0; // password is case-sensitive, keep as is
         char combined[MAX_LINE];
         snprintf(combined, MAX_LINE, "%s%s", password, nonce);
         unsigned long hash = djb2(combined);

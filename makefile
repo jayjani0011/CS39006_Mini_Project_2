@@ -32,7 +32,7 @@ drunclient: dclient
 	./dclient 127.0.0.1 8080
 
 clean:
-	rm -f smserver smclient dserver dclient init
+	rm -f smserver smclient dserver dclient init debug.log
 
 deepclean: clean
 	rm -rf mailboxes
