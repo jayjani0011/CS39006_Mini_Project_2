@@ -15,6 +15,8 @@
 #include <sys/select.h>
 #include <dirent.h>
 
+#include <signal.h>
+
 // not using const int here, because we need compile-time constraints for array sizes
 #define MAX_CLIENTS 10
 #define MAX_LINE 509 // as a dot-stuffed line will be .<line>\r\n
@@ -40,7 +42,7 @@ typedef struct {
     char to[2 * MAX_CLIENTS][21]; // array of recipient usernames, max MAX_CLIENTS recipients
     char subject[100];
     char body[50][100]; // assuming max 10 lines of body, each up to 100 characters
-    char date[20];
+    char date[30];
 } messageinfo;
 
 typedef struct {
@@ -71,6 +73,7 @@ void copymsg(messageinfo* dest, messageinfo* src) {
     }
     dest->to[to_count][0] = '\0';
     strcpy(dest->subject, src->subject);
+    strcpy(dest->date, src->date);
     // no need to copy body, we will read it from the file when the client sends the READ command, to save memory
 }
 
@@ -290,6 +293,21 @@ void reset_client(cliinfo* client) {
     client->nonce[0] = '\0';
 }
 
+int listen_fd = -1;
+cliinfo clients[MAX_CLIENTS];
+
+void handler(int sig) {
+    printf("\n[%s] Caught signal SIGINT, shutting down server...\n", gettime());
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (clients[i].fd != -1) {
+            send_all(clients[i].fd, "BYE\r\n");
+            close(clients[i].fd);
+        }
+    }
+    close(listen_fd);
+    exit(0);
+}
+
 unsigned long djb2(const char *str) {
     unsigned long hash = 5381;
     int c;
@@ -315,7 +333,7 @@ int main(int argc, char* argv[]) {
     char* users = strdup(argv[2]);
 
     // socket
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         perror("socket");
         exit(1);
@@ -350,10 +368,11 @@ int main(int argc, char* argv[]) {
     FD_SET(listen_fd, &master_set);
     int max_fd = listen_fd;
 
-    cliinfo clients[MAX_CLIENTS];
     for (int i = 0; i < MAX_CLIENTS; i++) {
         reset_client(clients + i);
     }
+
+    signal(SIGINT, handler);
     
     printf("[%s] Waiting for clients to connect...\n", gettime());
 
@@ -694,9 +713,10 @@ int main(int argc, char* argv[]) {
                             int k = findindex(users_info, clients[i].msg.to[j]);
                             users_info[k].inboxCnt++; // this will decrease on deletion, but unique_id will always increase, so we can use unique_id to generate unique filenames for each message
                             users_info[k].unique_id++; // increment unique_id for each new message
-                            snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].msg.to[j], users_info[k].unique_id);
+                            clients[i].msg.id = users_info[k].unique_id; // assign the unique_id to the message id before saving, so that when the client reads the message, it can know its id from the filename
+                            snprintf(path, MAX_LINE, "./mailboxes/%s/%d.txt", clients[i].msg.to[j], clients[i].msg.id);
                             FILE* fptr = fopen(path, "w");
-                            printf("[%s] Delivering mail to %s's mailbox with id %d\n", gettime(), clients[i].msg.to[j], users_info[k].unique_id);
+                            printf("[%s] Delivering mail to %s's mailbox with id %d\n", gettime(), clients[i].msg.to[j], clients[i].msg.id);
                             if (fptr) {
                                 // use gettime to get the current time
                                 strcpy(clients[i].msg.date, gettime());

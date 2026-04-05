@@ -233,8 +233,8 @@ void handle_receiver(int sockfd, char* username) {
                 }
                 char* space = strchr(resp + 3, ' ');
                 space[0] = '\0';
-                printf("ID   From           Subject             Date\n");
-                printf("---  ----           -------             ----\n");
+                printf("ID    From              Subject                   Date\n");
+                printf("---   ----              -------                   ----\n");
                 int listed_count = atoi(resp + 3);
                 for (int i = 0; i < listed_count; i++) {
                     recv_line(sockfd, resp);
@@ -242,9 +242,9 @@ void handle_receiver(int sockfd, char* username) {
                     char* token = strtok(resp, "~");
                     printf("%-5s ", token); // id
                     token = strtok(NULL, "~");
-                    printf("%-15s ", token); // from
+                    printf("%-17s ", token); // from
                     token = strtok(NULL, "~");
-                    printf("%-20s ", token); // subject
+                    printf("%-25s ", token); // subject
                     token = strtok(NULL, "~");
                     printf("%s\n", token); // date
                 }

@@ -1,9 +1,7 @@
-From: bob the builder
+From: Bob
 To: jay
-Subject: Hello
-Date: 2026-04-03 13:02:20
+Subject: Acknowledge
+Date: 2026-04-05 14:39:27
 ---
-Hii everyone
-how are you all?
-Bye/
-.
+Acknowledge karu chhu hu tamaro mail mane mali gayo chhe...
+bye bye..
