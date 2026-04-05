@@ -13,14 +13,22 @@ SimpleMail is a command-line email system built in C using TCP sockets. It imple
 
 ## Building and Running
 
+Makefile targets :
 ```bash
-make            # builds smserver and smclient (and debug variants dserver, dclient)
-make init       # builds the init utility
 make runinit    # runs ./init users.txt to set up mailboxes
 make runserver  # runs ./smserver 8080 users.txt
 make runclient  # runs ./smclient 127.0.0.1 8080
+make drunserver # runs ./dserver 8080 users.txt, i.e. server in debug mode to write debug.log
+make drunclient # runs ./dclient 127.0.0.1 8080, i.e. client in debug mode to write debug.log
 make clean      # removes all binaries
 make deepclean  # removes binaries AND the mailboxes/ directory
+```
+
+Running :
+```bash
+make runinit
+make runserver
+make runclient
 ```
 
 ---
