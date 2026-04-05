@@ -132,6 +132,7 @@ void smtp2(int sockfd) {
     printf("Subject: ");
     fgets(subject, MAX_LINE, stdin);
     subject[strcspn(subject, "\n")] = 0;
+    if (subject[0] == '\0') strcpy(subject, "(No Subject)"); // default subject if empty
     char sub_cmd[MAX_LINE];
     snprintf(sub_cmd, MAX_LINE, "SUB %s\r\n", subject);
     send_all(sockfd, sub_cmd);
