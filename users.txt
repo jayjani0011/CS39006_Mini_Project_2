@@ -2,3 +2,6 @@ alice secretpass1
 bob hunter2
 charlie x9Kp2mW
 jay myPassword123
+diana sunflower99
+eve redApple42
+frank blueOcean7
