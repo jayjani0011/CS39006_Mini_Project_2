@@ -79,14 +79,12 @@ Each user's `mailboxes/<username>/0.txt` stores the last-used integer ID. On eve
 
 4. **`init` must be run before `smserver`.** The server does not create mailbox directories itself — it exits with an error if a user's directory is missing. Run `make runinit` once before the first `make runserver`.
 
-5. **30-second idle timeout not implemented.** The spec requires the server to close connections with no mode declaration within 30 seconds. The current implementation uses a blocking `select()` with no timeout, so idle connections remain open indefinitely until the client disconnects or sends a command.
+5. **`ERR Authentication failed` includes remaining attempts.** The server appends the remaining attempt count to the authentication failure response (e.g., `ERR Authentication failed 2`) so the client can display it to the user. This is an extension of the base spec response.
 
-6. **`ERR Authentication failed` includes remaining attempts.** The server appends the remaining attempt count to the authentication failure response (e.g., `ERR Authentication failed 2`) so the client can display it to the user. This is an extension of the base spec response.
+6. **Empty subject handling.** If the client sends `SUB ` with nothing after the space, the subject is stored as an empty string, not `(no subject)`. This is a minor deviation from the spec.
 
-7. **Empty subject handling.** If the client sends `SUB ` with nothing after the space, the subject is stored as an empty string, not `(no subject)`. This is a minor deviation from the spec.
+7. **Nonce generation.** The nonce is generated using `rand()` seeded with `time(NULL) + i` (where `i` is the character index). This is not cryptographically secure but is sufficient for this project.
 
-8. **Nonce generation.** The nonce is generated using `rand()` seeded with `time(NULL) + i` (where `i` is the character index). This is not cryptographically secure but is sufficient for this project.
+8. **`users.txt` requires at least one valid user.** Malformed lines are skipped silently, but if the file is entirely invalid or missing, the server exits.
 
-9. **`users.txt` requires at least one valid user.** Malformed lines are skipped silently, but if the file is entirely invalid or missing, the server exits.
-
-10. **Debug mode.** Compiling with `-DDEBUG` (targets `dserver` / `dclient`) logs all raw protocol lines to `debug.log` for inspection.
+9. **Debug mode.** Compiling with `-DDEBUG` (targets `dserver` / `dclient`) logs all raw protocol lines to `debug.log` for inspection.
